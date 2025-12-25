@@ -1,0 +1,20 @@
+{
+  "name": "ecogrid-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "",
+  "main": "server.ts",
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.0.3",
+    "@types/pg": "^8.16.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "pg": "^8.16.3"
+  }
+}
