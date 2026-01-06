@@ -22,14 +22,18 @@ interface Turbine {
 }
 
 app.get('/api/turbines', async (req: Request, res: Response) => {
+  const { minLon, minLat, maxLon, maxLat } = req.query;
+
   try {
     const result = await pool.query<Turbine>(
-      'SELECT id, location_name, capacity_mw, lat, lon FROM german_wind_power LIMIT 1000'
-    );
+      `SELECT id, location_name, capacity_mw, ST_X(geon) as lon, ST_Y(geom) as lat
+      FROM german_wind_power
+      WHERE geom && ST_MakeEnvelope($1, $2, $3, $4, 4321)
+      LIMIT 1000;
+    `, [minLon, minLat, maxLon, maxLat]);
     res.json(result.rows);
   } catch (err) {
-    console.error(err);
-    res.status(500).send('Server Error');
+    res.status(500).json({ error: "SQL Spatial Query Failed"});
   }
 });
 
