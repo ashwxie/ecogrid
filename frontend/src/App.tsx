@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import 'ol/ol.css';
 import Feature from 'ol/Feature';
 import Map from 'ol/Map';
@@ -10,7 +10,7 @@ import VectorLayer from 'ol/layer/Vector';
 import Cluster from 'ol/source/Cluster';
 import OSM from 'ol/source/OSM';
 import VectorSource from 'ol/source/Vector';
-import { fromLonLat } from 'ol/proj';
+import { fromLonLat, toLonLat } from 'ol/proj';
 import { Circle, Fill, Stroke, Style, Text  } from 'ol/style';
 import { calculateHouseholds } from './utils';
 
@@ -21,13 +21,15 @@ interface Turbine {
   lon: number | string;
   capacity_mw: string;
 }
+const API_BASE_URL = 'http://localhost:4000/api'
 
 function App() {
   const mapElement = useRef<HTMLDivElement>(null);
   const mapInstance = useRef<Map | null>(null);
   const popupElement = useRef<HTMLDivElement>(null);
   const popupContent = useRef<HTMLDivElement>(null);
-
+  const vectorSourceRef = useRef<VectorSource>(new VectorSource());
+  
   const [turbines, setTurbines] = useState<Turbine[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -42,12 +44,43 @@ function App() {
     filteredTurbines.reduce((sum, t) => sum + (parseFloat(t.capacity_mw) || 0), 0)
   , [filteredTurbines]);
 
+  const fetchInBBox = useCallback(() => {
+    const map = mapInstance.current;
+    if (!map) return;
+    
+    setLoading(true);
+    const extent = map.getView().calculateExtent(map.getSize());
+    const bottomLeft = toLonLat([extent[0], extent[1]]);
+    const topRight = toLonLat([extent[2], extent[3]]);
+
+    fetch(`${API_BASE_URL}/turbines/bbox?minLon=${bottomLeft[0]}&minLat=${bottomLeft[1]}&maxLon=${topRight[0]}&maxLat=${topRight[1]}`)
+      .then(res => {
+        if (!res.ok) throw new Error('BBox API Error');
+        return res.json();
+      }).then(data => {
+        setTurbines(data);
+        vectorSourceRef.current.clear();
+        const features = data.map((t: Turbine) => {
+          const f = new Feature({ 
+            geometry: new Point(fromLonLat([Number(t.lon), Number(t.lat)])) 
+          });
+          f.setProperties(t);
+          return f;
+        });
+        vectorSourceRef.current.addFeatures(features);
+        setLoading(false);
+        setError(null);
+      }).catch(err => {
+        setError("Could not load regional data.");
+        setLoading(false);
+      });
+  }, []);
+
   useEffect(() => {
     if (!mapElement.current || !popupElement.current || !popupContent.current) return;
-    const vectorSource = new VectorSource();
     const clusterSource = new Cluster({
       distance: 40,
-      source: vectorSource,
+      source: vectorSourceRef.current,
     });
     const clusters = new VectorLayer({
       source: clusterSource,
@@ -87,14 +120,14 @@ function App() {
     const overlay = new Overlay({ element: popupElement.current, autoPan: true });
     map.addOverlay(overlay);
 
-    map.on('click', (e) => {
-      const feature = map.forEachFeatureAtPixel(e.pixel, (feat) => feat);
+    map.on('click', (evt) => {
+      const feature = map.forEachFeatureAtPixel(evt.pixel, (feat) => feat);
       if (feature && feature.get('features')) {
         const clusterFeatures = feature.get('features');
         if (clusterFeatures.length === 1) {
           const data = clusterFeatures[0].getProperties();
           const capacity = parseFloat(data.capacity_mw) || 0;
-          const households = Math.round((capacity * 2000) / 3.5); // Household Calculation: $Capacity \times 2000 / 3.5$
+          const households = calculateHouseholds(capacity) // Household Calculation: $Capacity \times 2000 / 3.5$
           if (popupContent.current && popupElement.current) {
           popupContent.current.innerHTML = `
             <div style="font-family: Arial, sans-serif; padding: 5px; font-size: 13px;">  
@@ -104,85 +137,117 @@ function App() {
               Powers: <b>~${households.toLocaleString()} homes/y</b>
             </div>`;
           popupElement.current.style.display = 'block';
-          overlay.setPosition(e.coordinate);
+          overlay.setPosition(evt.coordinate);
           }
         }
       } else {
         if (popupElement.current) popupElement.current.style.display = 'none';
       }
     });
+map.getViewport().addEventListener('contextmenu', (evt) => {
+      evt.preventDefault();
+      const coords = map.getEventCoordinate(evt);
+      const [lon, lat] = toLonLat(coords);
 
-    setLoading(true);
-    fetch('http://localhost:4000/api/turbines')
-      .then(res => {
-        if(!res.ok) throw new Error('Failed to connect to ecogrid API');
-        return res.json();
-      }).then(data => {
-        setTurbines(data);
-        const features = data.map((t: Turbine) => {
-          const lon = typeof t.lon === 'string' ? parseFloat(t.lon) : t.lon;
-          const lat = typeof t.lat === 'string' ? parseFloat(t.lat) : t.lat;
-            const feature = new Feature({
-              geometry: new Point(fromLonLat([lon, lat])),
-            });
-            feature.setProperties({
-              location_name: t.location_name,
-              capacity_mw: t.capacity_mw
-            });
-          return feature;        
-      });
-      vectorSource.addFeatures(features);
-      setLoading(false);
-    }).catch(e => {
-      setError(e.message);
-      setLoading(false);
+      fetch(`${API_BASE_URL}/turbines/nearest?lon=${lon}&lat=${lat}`)
+        .then(res => res.json())
+        .then(data => {
+          if (data.length > 0) {
+            alert(`Nearest: ${data[0].location_name} at ${data[0].capacity_mw} MW`);
+          }
+        });
     });
+
+    // Performance Optimization: Fetch on Move
+    map.on('moveend', fetchInBBox);
+
+    // Change cursor on hover
+    map.on('pointermove', (e) => {
+      const pixel = map.getEventPixel(e.originalEvent);
+      map.getTargetElement().style.cursor = map.hasFeatureAtPixel(pixel) ? 'pointer' : '';
+    });
+
+    // Initial Fetch
+    fetchInBBox();
+
     return () => map.setTarget(undefined);
-  }, []);
+  }, [fetchInBBox]);
 
-  return (
-    <div style={{ display: 'flex', width: '100vw', height: '100vh', fontFamily: 'Arial' }}>
+  const flyTo = (lon: number, lat: number) => {
+    mapInstance.current?.getView().animate({
+      center: fromLonLat([lon, lat]),
+      zoom: 13,
+      duration: 1000
+    });
+  };
+return (
+    <div style={{ display: 'flex', width: '100vw', height: '100vh', overflow: 'hidden' }}>
       
-      {/* --- SIDEBAR --- */}
-      <div style={{ width: '350px', background: '#f8f9fa', padding: '20px', borderRight: '1px solid #ddd', display: 'flex', flexDirection: 'column' }}>
-        <h2 style={{ color: '#2e7d32', margin: '0 0 20px 0' }}>🌿 EcoGrid DE</h2>
-        
-        {loading && <div className="loader">🛰️ Fetching Grid Data...</div>}
-        {error && <div style={{ color: 'red', padding: '10px', background: '#fee' }}>⚠️ {error}</div>}
-
-        {!loading && !error && (
-          <>
-            <div style={{ marginBottom: '20px', padding: '15px', background: '#fff', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
-              <p style={{ margin: '0', fontSize: '12px', color: '#666' }}>TOTAL CAPACITY</p>
-              <h1 style={{ margin: '5px 0', color: '#2e7d32' }}>{totalMW.toFixed(1)} <span style={{ fontSize: '18px' }}>MW</span></h1>
-              <p style={{ margin: '0', fontSize: '12px' }}>🔋 Powers ~{((totalMW * 2000) / 3.5).toLocaleString()} households</p>
-            </div>
-
-            <input 
-              type="text" 
-              placeholder="Search by location..." 
-              style={{ padding: '10px', borderRadius: '4px', border: '1px solid #ccc', marginBottom: '10px' }}
-              onChange={(e) => setTerm(e.target.value)}
-            />
-            
-            <div style={{ flex: 1, overflowY: 'auto', fontSize: '13px' }}>
-              <p>{filteredTurbines.length} Turbines found</p>
-              {filteredTurbines.slice(0, 100).map(t => (
-                <div key={t.id} style={{ padding: '8px 0', borderBottom: '1px solid #eee' }}>
-                  <b>{t.location_name}</b> ({t.capacity_mw} MW)
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-      </div>
-
-      {/* --- MAP --- */}
-      <div ref={mapElement} style={{ flex: 1, position: 'relative' }}>
-        <div ref={popupElement} className="ol-popup" style={{ /* ... existing popup styles ... */ }}>
-          <div ref={popupContent} />
+      {/* Sidebar Section */}
+      <aside style={{ width: '350px', backgroundColor: '#fff', borderRight: '1px solid #ddd', display: 'flex', flexDirection: 'column', zIndex: 10 }}>
+        <div style={{ padding: '20px', backgroundColor: '#fdfdfd' }}>
+          <h2 style={{ color: '#2e7d32', margin: 0 }}>🌿 EcoGrid DE</h2>
+          <p style={{ fontSize: '12px', color: '#666' }}>High-Performance Spatial Dashboard</p>
         </div>
-      </div>
+
+        <div style={{ padding: '0 20px 20px' }}>
+          {error && <div style={{ color: 'red', fontSize: '12px' }}>⚠️ {error}</div>}
+          
+          <div style={{ background: '#f0f4f0', padding: '15px', borderRadius: '10px', marginBottom: '15px' }}>
+            <span style={{ fontSize: '11px', color: '#444' }}>REGIONAL CAPACITY</span>
+            <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#2e7d32' }}>
+              {totalMW.toFixed(1)} MW
+            </div>
+            <span style={{ fontSize: '12px' }}>{calculateHouseholds(totalMW).toLocaleString()} Households</span>
+          </div>
+
+          <input 
+            type="text" 
+            placeholder="Search visible location..." 
+            style={{ width: '100%', padding: '10px', borderRadius: '5px', border: '1px solid #ddd', boxSizing: 'border-box' }}
+            onChange={(e) => setTerm(e.target.value)}
+          />
+        </div>
+
+        {/* Scrollable Turbine List */}
+        <div style={{ flex: 1, overflowY: 'auto', borderTop: '1px solid #eee' }}>
+          {loading && <p style={{ padding: '20px', fontSize: '13px' }}>🛰️ Syncing grid data...</p>}
+          {filteredTurbines.slice(0, 50).map(t => (
+            <div 
+              key={t.id} 
+              onClick={() => flyTo(Number(t.lon), Number(t.lat))}
+              style={{ padding: '12px 20px', borderBottom: '1px solid #f9f9f9', cursor: 'pointer', transition: 'background 0.2s' }}
+              onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#f5f5f5')}
+              onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
+            >
+              <div style={{ fontSize: '13px', fontWeight: 'bold' }}>{t.location_name}</div>
+              <div style={{ fontSize: '11px', color: '#888' }}>{t.capacity_mw} MW</div>
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      {/* Map Section */}
+      <main ref={mapElement} style={{ flex: 1, position: 'relative' }}>
+        <div 
+          ref={popupElement} 
+          style={{ 
+            position: 'absolute', 
+            background: 'white', 
+            padding: '12px', 
+            borderRadius: '8px', 
+            boxShadow: '0 4px 15px rgba(0,0,0,0.15)', 
+            display: 'none', 
+            minWidth: '180px',
+            transform: 'translate(-50%, -100%)',
+            marginTop: '-15px'
+          }}
+        >
+          <div ref={popupContent} />
+          {/* Arrow pointing down */}
+          <div style={{ position: 'absolute', left: '50%', bottom: '-8px', transform: 'translateX(-50%)', width: 0, height: 0, borderLeft: '8px solid transparent', borderRight: '8px solid transparent', borderTop: '8px solid white' }} />
+        </div>
+      </main>
     </div>
   );
 }
