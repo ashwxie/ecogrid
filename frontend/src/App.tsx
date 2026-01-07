@@ -10,6 +10,7 @@ import VectorLayer from 'ol/layer/Vector';
 import Cluster from 'ol/source/Cluster';
 import OSM from 'ol/source/OSM';
 import VectorSource from 'ol/source/Vector';
+import { createEmpty, extend } from 'ol/extent';
 import { fromLonLat, toLonLat } from 'ol/proj';
 import { Circle, Fill, Stroke, Style, Text  } from 'ol/style';
 import { calculateHouseholds } from './utils';
@@ -34,6 +35,15 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [term, setTerm] = useState('');
+
+  const getClusterExtent = (clusterFeatures: Feature[]) => {
+    const extent = createEmpty();
+    clusterFeatures.forEach((f) => {
+      const geometry = f.getGeometry();
+      if (geometry) extend(extent, geometry.getExtent());
+    });
+    return extent;
+  };
 
   const filteredTurbines = useMemo(() => {
     return turbines.filter(t => 
@@ -76,7 +86,7 @@ function App() {
       });
   }, []);
 
-  useEffect(() => {
+  useEffect(() => { 
     if (!mapElement.current || !popupElement.current || !popupContent.current) return;
     const clusterSource = new Cluster({
       distance: 40,
@@ -122,29 +132,45 @@ function App() {
 
     map.on('click', (evt) => {
       const feature = map.forEachFeatureAtPixel(evt.pixel, (feat) => feat);
+
       if (feature && feature.get('features')) {
         const clusterFeatures = feature.get('features');
-        if (clusterFeatures.length === 1) {
+
+        if (clusterFeatures.length > 1) {
+          const extent = getClusterExtent(clusterFeatures);
+          const isEmpty = (extent[0] === Infinity || extent[1] === Infinity);
+          if (!isEmpty) {
+            map.getView().fit(extent, {
+              padding: [100, 100, 100, 100], // Increased padding for better view
+              duration: 800,
+              maxZoom: 14 // Keeps it from zooming into a blank screen
+            });
+          }
+          if (popupElement.current) popupElement.current.style.display = 'none';
+        } else if (clusterFeatures.length === 1) {
           const data = clusterFeatures[0].getProperties();
           const capacity = parseFloat(data.capacity_mw) || 0;
-          const households = calculateHouseholds(capacity) // Household Calculation: $Capacity \times 2000 / 3.5$
+          const households = calculateHouseholds(capacity)
+          setTerm(data.location_name);
+
           if (popupContent.current && popupElement.current) {
-          popupContent.current.innerHTML = `
-            <div style="font-family: Arial, sans-serif; padding: 5px; font-size: 13px;">  
-              <strong style="color: #2e7d32;">${data.location_name || 'Unknown Turbine'}</strong><br />
-              <hr style="border: 0; border-top: 1px solid #eee; margin: 5px 0;">
-              Capacity: <b>${capacity} MW</b><br />
-              Powers: <b>~${households.toLocaleString()} homes/y</b>
-            </div>`;
-          popupElement.current.style.display = 'block';
-          overlay.setPosition(evt.coordinate);
+            popupContent.current.innerHTML = `
+              <div style="font-family: Arial, sans-serif; padding: 5px; font-size: 13px;">  
+                <strong style="color: #2e7d32;">${data.location_name || 'Unknown Turbine'}</strong><br />
+                <hr style="border: 0; border-top: 1px solid #eee; margin: 5px 0;">
+                Capacity: <b>${capacity} MW</b><br />
+                Powers: <b>~${households.toLocaleString()} homes/y</b>
+              </div>`;
+            popupElement.current.style.display = 'block';
+            overlay.setPosition(evt.coordinate);
           }
         }
       } else {
         if (popupElement.current) popupElement.current.style.display = 'none';
       }
     });
-map.getViewport().addEventListener('contextmenu', (evt) => {
+
+    map.getViewport().addEventListener('contextmenu', (evt) => {
       evt.preventDefault();
       const coords = map.getEventCoordinate(evt);
       const [lon, lat] = toLonLat(coords);
@@ -158,16 +184,13 @@ map.getViewport().addEventListener('contextmenu', (evt) => {
         });
     });
 
-    // Performance Optimization: Fetch on Move
     map.on('moveend', fetchInBBox);
 
-    // Change cursor on hover
-    map.on('pointermove', (e) => {
-      const pixel = map.getEventPixel(e.originalEvent);
+    map.on('pointermove', (evt) => {
+      const pixel = map.getEventPixel(evt.originalEvent);
       map.getTargetElement().style.cursor = map.hasFeatureAtPixel(pixel) ? 'pointer' : '';
     });
 
-    // Initial Fetch
     fetchInBBox();
 
     return () => map.setTarget(undefined);
@@ -180,7 +203,17 @@ map.getViewport().addEventListener('contextmenu', (evt) => {
       duration: 1000
     });
   };
-return (
+
+  const resetMap = () => {
+    mapInstance.current?.getView().animate({
+      center: fromLonLat([10.4515, 51.1657]),
+      zoom: 6,
+      duration: 1000
+    });
+    setTerm('');
+  }
+
+  return (
     <div style={{ display: 'flex', width: '100vw', height: '100vh', overflow: 'hidden' }}>
       
       {/* Sidebar Section */}
@@ -229,6 +262,28 @@ return (
 
       {/* Map Section */}
       <main ref={mapElement} style={{ flex: 1, position: 'relative' }}>
+        <button 
+          onClick={resetMap}
+          style={{
+            position: 'absolute',
+            top: '20px',
+            right: '20px',
+            zIndex: 10,
+            padding: '10px 15px',
+            backgroundColor: '#fff',
+            border: '1px solid #ddd',
+            borderRadius: '8px',
+            cursor: 'pointer',
+            boxShadow: '0 2px 6px rgba(0,0,0,0.1)',
+            fontWeight: 'bold',
+            color: '#2e7d32',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '5px'
+          }}
+        >
+          Reset
+        </button>
         <div 
           ref={popupElement} 
           style={{ 
